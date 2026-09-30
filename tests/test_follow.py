@@ -226,3 +226,65 @@ def test_get_object_or_404_skips_local_model_alias():
             "    return obj\n"
         )
     assert "Alias" not in _models_read(d), "credited a phantom table named after a local alias var"
+
+
+def test_sibling_branch_not_starved_by_shared_seen():
+    """A later sibling branch that re-reads an earlier sibling's shallow models must STILL descend to
+    its own unique deep read — novelty is per-branch, not per-endpoint. Regression for the shared-`seen`
+    silent recall loss (adaptive dropped a real table while labelling the endpoint complete)."""
+    d = tempfile.mkdtemp()
+    with open(os.path.join(d, "app.py"), "w") as f:
+        f.write(
+            "from fastapi import FastAPI\napp = FastAPI()\n"
+            "@app.get('/thing')\n"
+            "def handler():\n    a_branch(); b_branch(); return 1\n"
+            "def a_branch(): Dup1.objects.all(); return a2()\n"
+            "def a2():       Dup2.objects.all(); return a3()\n"
+            "def a3():       Dup3.objects.all(); return 1\n"
+            "def b_branch(): Dup1.objects.all(); return b2()\n"        # re-reads a-branch's models
+            "def b2():       Dup2.objects.all(); return b3()\n"
+            "def b3():       Dup3.objects.all(); return b4()\n"
+            "def b4():       SecretLedger.objects.all(); return 1\n")  # UNIQUE deep read at depth 4
+    ep = _thing_ep(d)
+    tabs = {i.split(" @ ")[0].split(":")[0] for i in ep.e3_db_tables.items}
+    assert "SecretLedger" in tabs, f"a sibling branch was starved by shared `seen`: {sorted(tabs)}"
+    assert ep.follow_stop == "dried_out"
+
+
+def test_leaf_at_ceiling_stays_complete_not_falsely_flagged():
+    """A COMPLETE walk whose deepest fact-frame sits exactly at DEPTH_CEILING but is a LEAF (nothing left
+    to follow) must stay 'dried_out'; only a genuinely deeper chain that is really cut may report
+    'ceiling'. Regression for the false-positive ceiling/budget label."""
+    from analyzer import DEPTH_CEILING
+    leaf = _thing_ep(_deep_chain_repo([f"C{i}.objects.all()" for i in range(DEPTH_CEILING)]))
+    assert leaf.follow_stop == "dried_out", f"leaf at ceiling mislabelled {leaf.follow_stop!r}"
+    cut = _thing_ep(_deep_chain_repo([f"D{i}.objects.all()" for i in range(DEPTH_CEILING + 2)]))
+    assert cut.follow_stop == "ceiling", f"a genuine cut must stay flagged, got {cut.follow_stop!r}"
+
+
+def test_name_collision_resolves_independent_of_walk_order():
+    """Two same-named helpers in different apps must resolve to the SAME one regardless of filesystem
+    walk order — else the extractor emits different tables across machines/CI checkouts. Regression for
+    the unsorted os.walk + `_pick` first-candidate tie."""
+    import analyzer as A
+    d = tempfile.mkdtemp()
+    for app, mdl in [("alpha", "AlphaModel"), ("beta", "BetaModel")]:
+        os.makedirs(os.path.join(d, "apps", app))
+        with open(os.path.join(d, "apps", app, "helpers.py"), "w") as f:
+            f.write(f"def shared_helper():\n    {mdl}.objects.create(x=1)\n")
+    os.makedirs(os.path.join(d, "apps", "main"))
+    with open(os.path.join(d, "apps", "main", "views.py"), "w") as f:
+        f.write("from fastapi import FastAPI\napp = FastAPI()\n"
+                "@app.get('/thing')\ndef handler():\n    return shared_helper()\n")
+
+    def tabs():
+        return {i.split(" @ ")[0].split(":")[0] for i in _thing_ep(d).e3_db_tables.items}
+
+    normal = tabs()
+    orig = A.os.walk
+    try:                # force the opposite traversal order; sorted _iter_py must neutralise it
+        A.os.walk = lambda p: [(dp, sorted(dn, reverse=True), sorted(fn, reverse=True)) for dp, dn, fn in orig(p)]
+        flipped = tabs()
+    finally:
+        A.os.walk = orig
+    assert normal == flipped, f"walk order changed name resolution: {normal} vs {flipped}"
