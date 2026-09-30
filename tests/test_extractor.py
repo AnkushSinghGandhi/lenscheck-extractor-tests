@@ -436,3 +436,54 @@ def test_fk_traversal_read_uses_kwarg_line_not_call_line():
     assert lines["Child"] == 3                                # the parent query owns the call line
     assert lines["Parent"] == 5                               # the FK read points at its own kwarg
     assert lines["Child"] != lines["Parent"]
+
+
+# --- accuracy regressions: no hallucinated reads (the "not more" guarantee) ---
+def _db_facts(src, known=None):
+    fc = FactCollector("m.py", known_models=set(known or []))
+    fc.visit(ast.parse(src))
+    return {(m, k) for m, k, _f, _l in fc.db}
+
+
+def test_filter_update_is_write_only_no_phantom_read():
+    """`Model.objects.filter(...).update(...)` is a single UPDATE — the filter is the WHERE clause and
+    issues no SELECT, so it must record ONLY a write. Regression for the phantom-read hallucination."""
+    facts = _db_facts("class H:\n def f(self, pk):\n  Account.objects.filter(id=pk).update(name='x')\n")
+    assert ("Account", "write") in facts
+    assert ("Account", "read") not in facts, "filter().update() WHERE clause hallucinated a read"
+
+
+def test_filter_delete_is_write_only_no_phantom_read():
+    facts = _db_facts("class H:\n def f(self, pk):\n  Order.objects.filter(id=pk).delete()\n")
+    assert ("Order", "write") in facts
+    assert ("Order", "read") not in facts, "filter().delete() WHERE clause hallucinated a read"
+
+
+def test_field_lookup_is_not_an_fk_traversal():
+    """`status__in` / `target_year__gt` / `removed_at__isnull` filter LOCAL columns (no join) even when a
+    model shares the field-stem's name; only `fk__relatedcol` joins. Regression for the FK over-fire."""
+    known = {"Campaign", "Status", "TargetYear", "Customer"}
+    facts = _db_facts(
+        "class H:\n def f(self):\n"
+        "  Campaign.objects.filter(status__in=['a'], target_year__gt=0, removed_at__isnull=True)\n"
+        "  Campaign.objects.filter(customer__email='x@y.com')\n", known)
+    models = {m for m, _ in facts}
+    assert "Status" not in models and "TargetYear" not in models, "a lookup suffix hallucinated a model read"
+    assert ("Customer", "read") in facts, "a real fk traversal customer__email must read Customer"
+    assert ("Campaign", "read") in facts
+
+
+def test_fk_id_and_pk_suffix_do_not_join():
+    """`fk__id` / `fk__pk` resolve to the LOCAL fk column — no join, no related-table read."""
+    facts = _db_facts("class H:\n def f(self):\n  Order.objects.filter(customer__id=5, customer__pk=6)\n",
+                      {"Order", "Customer"})
+    assert ("Customer", "read") not in facts, "fk__id/fk__pk must not be read as a join"
+
+
+def test_raw_sql_not_double_counted_as_model_and_table():
+    """`Model.objects.raw('… FROM tbl')` reads `tbl` (== the model's table) — recording BOTH the model
+    and the parsed table double-counts one read. The parsed table is authoritative."""
+    facts = _db_facts("class H:\n def f(self):\n  Campaign.objects.raw('SELECT * FROM ad_campaigns WHERE x=1')\n")
+    models = {m for m, _ in facts}
+    assert "Campaign" not in models, "raw() double-counted the model on top of the parsed table"
+    assert ("ad_campaigns", "read") in facts

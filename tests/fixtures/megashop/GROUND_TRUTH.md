@@ -70,7 +70,7 @@ only) · **n/a**. Auth `[✓]` = resolved (may be *open* — see the value); `[?
 | route | handler | method | E2 auth | E3 db | E4 ext | E5 async | E6 pii | E7 cache |
 |-------|---------|--------|---------|-------|--------|---------|--------|---------|
 | `accounts/<pk>/` | ProfileView | GET | **AllowAny** (explicit open) | accounts R | — | — | **⚠ to-client** (email returned) | — |
-| `accounts/<pk>/update/` | UpdateProfileView | POST | DRF default (IsAuthenticated) | accounts R+**W** (instance-var `UpdateFlow`) | — | — | ? (Account person-read) | — |
+| `accounts/<pk>/update/` | UpdateProfileView | POST | DRF default (IsAuthenticated) | accounts **W** (instance-var `UpdateFlow`; `filter().update()` is a pure write) | — | — | n/a (no read, `name` not PII) | — |
 | `accounts/notify/` | NotifyView | POST | **ApiKeyPermission** (custom) | accounts R | — | celery.delay `send_receipt` | **✓ off-platform** (email→celery) | — |
 | `accounts/webhook/` | AccountWebhookView | POST | **OPEN** (`permission_classes=[]`) | — | — | threading.Thread `_process` | — | — |
 | `accounts/articles/` | ArticleFetchView | GET | DRF default | articles R (**dynamic model** `fetch_all(Article)`) | — | — | — | — |

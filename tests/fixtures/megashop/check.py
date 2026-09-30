@@ -24,7 +24,7 @@ GT = {
     "PaymentWebhookView":  dict(db={"billing_payments"}, auth="open"),
     # accounts
     "ProfileView":         dict(db={"accounts"}, pii="⚠", auth="open"),
-    "UpdateProfileView":   dict(db={"accounts"}, pii="?", auth="closed"),
+    "UpdateProfileView":   dict(db={"accounts"}, pii="n/a", auth="closed"),   # filter().update() is a pure WRITE — no read, no PII
     "NotifyView":          dict(db={"accounts"}, async_=True, pii="✓", auth="closed"),
     "AccountWebhookView":  dict(db=set(), async_=True, auth="open"),
     "ArticleFetchView":    dict(db={"articles"}, forbidden=["model:"], auth="closed"),
